@@ -1,0 +1,4 @@
+setwd("C:\\Users\\User\\Desktop\\unreal_psychophysics\\rdas")
+
+load("repeat_jnd.rda")
+load("run_unreal_psy.rda")
