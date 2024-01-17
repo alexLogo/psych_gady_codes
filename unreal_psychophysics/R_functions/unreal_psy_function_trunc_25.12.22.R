@@ -239,16 +239,20 @@ unreal_psy<-function(paths,attempt,sub_n,study_number){
   
   #correcting some condition scales
   jnd_adjusted_thresholds$shifted_threshold<-jnd_adjusted_thresholds$adj_stim_val
+  #Slow is shifted to start at 1
+  jnd_adjusted_thresholds$shifted_threshold[jnd_adjusted_thresholds$Condition=='Slow'] <- jnd_adjusted_thresholds$shifted_threshold[jnd_adjusted_thresholds$Condition=='Slow']+1
   #Fast is shifted to start at 1
-  jnd_adjusted_thresholds$shifted_threshold[jnd_adjusted_thresholds$Condition=='Fast'] <- 1+jnd_adjusted_thresholds$shifted_threshold[jnd_adjusted_thresholds$Condition=='Fast']
+  jnd_adjusted_thresholds$shifted_threshold[jnd_adjusted_thresholds$Condition=='Fast'] <- jnd_adjusted_thresholds$shifted_threshold[jnd_adjusted_thresholds$Condition=='Fast']+1
   #Heavy is rescaled to less than -9.81
   jnd_adjusted_thresholds$shifted_threshold[jnd_adjusted_thresholds$Condition=='Heavy'] <- jnd_adjusted_thresholds$shifted_threshold[jnd_adjusted_thresholds$Condition=='Heavy']-9.81
   #Light is rescaled between -9.81 and 0
   jnd_adjusted_thresholds$shifted_threshold[jnd_adjusted_thresholds$Condition=='Light'] <- jnd_adjusted_thresholds$shifted_threshold[jnd_adjusted_thresholds$Condition=='Light']-9.81
   
   jnd_adjusted_thresholds$max_shifted_strength<-jnd_adjusted_thresholds$max_strength
+  #Slow is shifted to start at 1
+  jnd_adjusted_thresholds$max_shifted_strength[jnd_adjusted_thresholds$Condition=='Slow'] <- jnd_adjusted_thresholds$max_shifted_strength[jnd_adjusted_thresholds$Condition=='Slow']+1
   #Fast is shifted to start at 1
-  jnd_adjusted_thresholds$max_shifted_strength[jnd_adjusted_thresholds$Condition=='Fast'] <- 1+jnd_adjusted_thresholds$max_shifted_strength[jnd_adjusted_thresholds$Condition=='Fast']
+  jnd_adjusted_thresholds$max_shifted_strength[jnd_adjusted_thresholds$Condition=='Fast'] <- jnd_adjusted_thresholds$max_shifted_strength[jnd_adjusted_thresholds$Condition=='Fast']+1
   #Heavy is rescaled to less than -9.81
   jnd_adjusted_thresholds$max_shifted_strength[jnd_adjusted_thresholds$Condition=='Heavy'] <- jnd_adjusted_thresholds$max_shifted_strength[jnd_adjusted_thresholds$Condition=='Heavy']-9.81
   #Light is rescaled between -9.81 and 0

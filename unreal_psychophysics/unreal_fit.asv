@@ -149,7 +149,7 @@ for cond_num=1:length(cond_names)
         if points_counter < 1 || thresh_stim(1)>=4.6 || thresh_stim(2)>=4.6
             title({'';sprintf('\n %s, r^2 = %.2f \n L=%s \n',...
                 cond_names{cond_num}, p_r2,print_thresh_values(thresh_stim))},'Color','red');
-            msgbox('~~~~~~Bad Fit please do this condition again~~~~~~', cond_names{cond_num})
+            msgbox('';sprintf('~~~~~~Bad Fit please do this condition again~~~~~~', cond_names{cond_num}));
             doAgain = [doAgain, cond_names{cond_num}];
         else
             title({'';sprintf('\n %s, r^2 = %.2f  \n L=%s \n',...
@@ -162,7 +162,7 @@ for cond_num=1:length(cond_names)
         
     elseif p_r2<0.3 || isempty(p_r2) || isnan(p_r2) || p_r2>0.990
         clear title
-        msgbox('~~~~~~Bad Fit please do this condition again~~~~~~', cond_names{cond_num})
+        msgbox('~~~~~~Weak Fit please do this condition again~~~~~~', cond_names{cond_num})
         doAgain = [doAgain, cond_names{cond_num}];
         try
             title({'';sprintf('\n %s, r^2 = %.2f \n L=%s \n',...

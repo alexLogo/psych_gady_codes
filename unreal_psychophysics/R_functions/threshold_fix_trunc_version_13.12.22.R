@@ -26,6 +26,8 @@ threshold_fix<-function(org_threshold_df,paths,sub_n){
   hdf = hdf[order(hdf$Condition), ]
   
   #place the first value of each staircase from staircase_Data into the 0.95 value in hdf per condition
+  hdf[hdf$prob==0.95 & hdf$Condition=="Plant","adj_stim_val"]<-df[df$prob==0.95 & df$Condition=="Plant","max_strength"]
+  hdf[hdf$prob==0.95 & hdf$Condition=="Slow","adj_stim_val"]<-df[df$prob==0.95 & df$Condition=="Slow","max_strength"]
   hdf[hdf$prob==0.95 & hdf$Condition=="Fast","adj_stim_val"]<-df[df$prob==0.95 & df$Condition=="Fast","max_strength"]
   hdf[hdf$prob==0.95 & hdf$Condition=="Heavy","adj_stim_val"]<-df[df$prob==0.95 & df$Condition=="Heavy","max_strength"]
   hdf[hdf$prob==0.95 & hdf$Condition=="Light","adj_stim_val"]<-df[df$prob==0.95 & df$Condition=="Light","max_strength"]
@@ -38,6 +40,7 @@ threshold_fix<-function(org_threshold_df,paths,sub_n){
   
   
   
+  
   #place lvl2 and lvl1 in the 0.5/0.25 rows per condition
   hdf[hdf$prob==0.5,"adj_stim_val"]<-df[df$prob==0.5,"jnd_weighted_threshold"]
   
@@ -45,6 +48,8 @@ threshold_fix<-function(org_threshold_df,paths,sub_n){
   #It is worth mentioning that there are cases where the lowest value seen in a staircase, was the value of the JND, in this case
   #it would be wrong to limit the minimal stim value to what was seen during the staircase and move the JND value up.
   #So the only case that is relevant is if lvl1 is higher than the max staircase value seen, and that will probably never happen 
+  hdf[hdf$prob==0.25 & hdf$Condition=="Plant","adj_stim_val"]<-hdf[hdf$prob==0.5 & hdf$Condition=="Plant","jnd_weighted_threshold"]*0.7
+  hdf[hdf$prob==0.25 & hdf$Condition=="Slow","adj_stim_val"]<-hdf[hdf$prob==0.5 & hdf$Condition=="Slow","jnd_weighted_threshold"]*0.85
   hdf[hdf$prob==0.25 & hdf$Condition=="Fast","adj_stim_val"]<-hdf[hdf$prob==0.5 & hdf$Condition=="Fast","jnd_weighted_threshold"]*0.85
   hdf[hdf$prob==0.25 & hdf$Condition=="Heavy","adj_stim_val"]<-hdf[hdf$prob==0.5 & hdf$Condition=="Heavy","jnd_weighted_threshold"]*0.85
   hdf[hdf$prob==0.25 & hdf$Condition=="Light","adj_stim_val"]<-hdf[hdf$prob==0.5 & hdf$Condition=="Light","jnd_weighted_threshold"]*0.85
@@ -56,6 +61,8 @@ threshold_fix<-function(org_threshold_df,paths,sub_n){
   hdf[hdf$prob==0.25 & hdf$Condition=="Unsaturated","adj_stim_val"]<-hdf[hdf$prob==0.5 & hdf$Condition=="Unsaturated","jnd_weighted_threshold"]*0.65
   
   # 
+  hdf[hdf$prob==0.75 & hdf$Condition=="Plant","adj_stim_val"]<-mean(c(hdf[hdf$prob==0.5 & hdf$Condition=="Fast","adj_stim_val"],hdf[hdf$prob==0.95 & hdf$Condition=="Plant","adj_stim_val"]))
+  hdf[hdf$prob==0.75 & hdf$Condition=="Slow","adj_stim_val"]<-mean(c(hdf[hdf$prob==0.5 & hdf$Condition=="Fast","adj_stim_val"],hdf[hdf$prob==0.95 & hdf$Condition=="Slow","adj_stim_val"]))
   hdf[hdf$prob==0.75 & hdf$Condition=="Fast","adj_stim_val"]<-mean(c(hdf[hdf$prob==0.5 & hdf$Condition=="Fast","adj_stim_val"],hdf[hdf$prob==0.95 & hdf$Condition=="Fast","adj_stim_val"]))
   hdf[hdf$prob==0.75 & hdf$Condition=="Heavy","adj_stim_val"]<-mean(c(hdf[hdf$prob==0.5 & hdf$Condition=="Heavy","adj_stim_val"],hdf[hdf$prob==0.95 & hdf$Condition=="Heavy","adj_stim_val"]))
   hdf[hdf$prob==0.75 & hdf$Condition=="Light","adj_stim_val"]<-mean(c(hdf[hdf$prob==0.5 & hdf$Condition=="Light","adj_stim_val"],hdf[hdf$prob==0.95 & hdf$Condition=="Light","adj_stim_val"]))
@@ -76,7 +83,9 @@ threshold_fix<-function(org_threshold_df,paths,sub_n){
   #and lvl2, the actual jnd we found.
   #if lvl4 is max or above, it will be adjusted to the max value seen during the staircase.
   for (t in temp) {
-    if ((t == "Fast" && (df[i,"jnd_weighted_threshold"] < 0 || df[i,"jnd_weighted_threshold"] > df[df$prob==0.95 & df$Condition=="Fast","max_strength"]|| is.na(df[i,"jnd_weighted_threshold"]))) || 
+    if ((t == "Plant" && (df[i,"jnd_weighted_threshold"] < 0 || df[i,"jnd_weighted_threshold"] > df[df$prob==0.95 & df$Condition=="Plant","max_strength"]|| is.na(df[i,"jnd_weighted_threshold"]))) ||
+        (t == "Slow" && (df[i,"jnd_weighted_threshold"] < 0 || df[i,"jnd_weighted_threshold"] > df[df$prob==0.95 & df$Condition=="Slow","max_strength"]|| is.na(df[i,"jnd_weighted_threshold"]))) ||
+        (t == "Fast" && (df[i,"jnd_weighted_threshold"] < 0 || df[i,"jnd_weighted_threshold"] > df[df$prob==0.95 & df$Condition=="Fast","max_strength"]|| is.na(df[i,"jnd_weighted_threshold"]))) || 
         (t == "Grow" && (df[i,"jnd_weighted_threshold"] < 0 || df[i,"jnd_weighted_threshold"] > df[df$prob==0.95 & df$Condition=="Grow","max_strength"]|| is.na(df[i,"jnd_weighted_threshold"]))) ||
         (t == "Heavy" && (df[i,"jnd_weighted_threshold"] > 0 || df[i,"jnd_weighted_threshold"] < df[df$prob==0.95 & df$Condition=="Heavy","max_strength"]|| is.na(df[i,"jnd_weighted_threshold"]))) ||
         (t == "Saturated" && (df[i,"jnd_weighted_threshold"] < 0 || df[i,"jnd_weighted_threshold"] > df[df$prob==0.95 & df$Condition=="Saturated","max_strength"]|| is.na(df[i,"jnd_weighted_threshold"]))) ||
