@@ -1,1 +1,1 @@
-# psych_gady
+# psych_gadi
