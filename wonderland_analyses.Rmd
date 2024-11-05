@@ -1,0 +1,1473 @@
+---
+title: "Analysis of SoR Ratings"
+author: "Gadi Drori"
+date: "27 10 2022"
+output: html_document
+---
+
+```{r Setup, include=FALSE}
+rm(list = ls())
+knitr::opts_chunk$set(echo = FALSE,message=FALSE, warning=FALSE)
+```
+
+```{r Libraries}
+library(broom)
+library(corrplot)
+library(cowplot)
+library(data.table)
+library(dfoptim)
+library(dplyr)
+library(effects)
+library(emmeans)
+library(formattable)
+library(GGally)
+library(ggh4x)
+library(ggcorrplot)
+library(ggdist)
+library(ggExtra)
+library(ggpattern)
+library(ggplot2)
+library(ggpubr)
+library(ggsci)
+library(ggthemes)
+#library(glmulti)
+library(grDevices)
+library(grid)
+library(gridExtra)
+library(gt)
+library(here)
+library(Hmisc)
+library(htmltools)
+library(huxtable)
+library(janitor)
+library(jtools)
+library(kableExtra)
+library(latex2exp)
+library(lattice)
+library(lme4)
+library(lmerTest)
+library(MetBrewer)
+library(multcomp)
+library(MuMIn)
+library(optimx)
+library(PairedData)
+library(patchwork)
+library(pixiedust)
+library(plyr)
+library(pwr)
+library(RColorBrewer)
+library(renv)
+library(report)
+library(reshape2)
+library(rio)
+library(Rmisc)
+library(rstatix)
+library(scales)
+library(sjlabelled)
+library(sjmisc)
+library(sjPlot)
+library(sjstats)
+library(stringi)
+library(tibble)
+library(tidyquant)
+library(tidyr)
+library(tidyverse)
+library(webshot2)
+```
+
+```{r Functions}
+
+#plot style
+Ugly_theme <- function (base_size=20, base_family = "Sans",base_face="plain") 
+  {
+     theme_classic() %+replace% 
+     theme(aspect.ratio=1,axis.text=element_text(color="black",size=base_size-3),axis.title=element_text(color="black",vjust=-1,size=base_size-2),plot.title=element_text(color="black",hjust=0.5,vjust=-1,size=base_size),legend.text = element_text(size=base_size-5))
+           
+ }
+
+
+####################################################################################################################################################
+#Bayesian inference function
+
+ ProbRealCalc<-function(stim,sigma,p0_real,lambda,delta,alpha,simga_real){
+  
+  #calculate k
+
+  K=(sigma^2*(sigma^2+simga_real^2))/simga_real^2*
+    (2*log(p0_real/(1-p0_real))+log((sigma^2+simga_real^2)/sigma^2))
+  if (K>0){
+    
+  k=sqrt(K) #K turnes into small k
+  ProbChoice=0.5*lambda+(1-lambda)*(pnorm(k,mean =stim,sd=sigma)-pnorm(-k,mean =stim,sd=sigma))
+  }else{
+    ProbChoice=0
+  }
+
+      ProbChoice = alpha*ProbChoice^delta/(alpha*ProbChoice^delta+(1-ProbChoice)^delta)
+
+  return(ProbChoice)
+  
+} 
+
+#Bayesian model optimization function
+
+BImodel<-function(data,par){
+  
+  
+  RMSD = 10000000
+  
+  sigma = par[c(1,2,3)]
+  p0_real = par[c(4,5,6)]
+ lambda=par[c(7,8,9)]
+
+  delta = par[10]
+  alpha= par[11]
+  simga_real = DataSigma
+  Dnum = 1
+  
+  data$pred = 0
+  
+  
+  for (D in c("Perception","Nature","Self")){
+     data$pred[data$Domain==D] = 
+ProbRealCalc(data$level_adj[data$Domain==D],sigma[Dnum],p0_real[Dnum],lambda[Dnum],delta,alpha,simga_real)
+
+     Dnum = Dnum+1
+  }
+
+
+ if (sum(data$pred)!=0){
+
+   RMSD=mean(sqrt((data$RealityRating/100-data$pred)^2))
+
+}
+
+ return(RMSD)
+ 
+}
+
+####################################################################################################################################################
+# Function to replace outliers with NA's for a single column
+
+replace_outliers <- function(col) {
+  sd_val <- sd(col)
+  mean_val <- mean(col)
+  is_outlier <- abs(col - mean_val) > 2.5 * sd_val
+  col[is_outlier] <- NA
+  return(col)
+}
+
+####################################################################################################################################################
+#function for calculating the algebraic slope of ratings
+
+calculate_slope <- function(x1, y1, x2, y2) {
+  slope <- (y2 - y1) / (x2 - x1)
+  return(slope)
+}
+
+###################################################################################################################################################
+
+remove_outliers<-function(data){
+  
+#Apply the function to all numeric columns
+no_outliers <- data 
+no_outliers <- apply(data, 2, replace_outliers)
+
+#Apply the function to all numeric columns (excluding the 'Subject' column)
+no_outliers_2 <- no_outliers
+no_outliers_2 <- apply(no_outliers, 2, replace_outliers)
+
+#check if there were more outliers to remove after the first attempt
+if(all.equal(no_outliers,no_outliers_2)){
+  data<-no_outliers_2
+  return(data)
+}
+
+
+}
+
+
+min_max_norm <- function(x) {
+  (x - min(x)) / (max(x) - min(x))
+}
+```
+
+```{r Load data}
+
+#SoR ratings
+unreal = read.csv('unreal_2.8.23.csv', header=TRUE, stringsAsFactors = TRUE)
+
+#Combined studies file
+rsl = read.csv('rsl_2.8.23.csv', header=TRUE, stringsAsFactors = TRUE)
+
+#Psychophysics
+psych_all<-read.csv("psychophysics_6.8.24.csv", header=TRUE,stringsAsFactors =TRUE)
+
+#Questionnaire data
+pqb = read.csv('PQB.csv', header=TRUE, stringsAsFactors = TRUE)
+ipase = read.csv('IPASE.csv', header=TRUE, stringsAsFactors = TRUE)
+caps = read.csv('CAPS.csv', header=TRUE, stringsAsFactors = TRUE)
+
+#Bayesian model parameter fits
+#CoefFit<-read.csv('ModelFitUnreal.csv',header = TRUE,stringsAsFactors = TRUE)
+
+#SoR ratings file after preprocessing + predicted ratings column
+#all_behave_mean<-read.csv('unreal_preds.csv',header = TRUE )
+
+#Variance of the model stimuli
+#DataSigma = sqrt( var(c(all_behave_mean$level_adj,-all_behave_mean$level_adj)))
+
+#Bootstrapped simulation using (n = 200) Bayesian model parameter sets
+#results_simulations<-read.csv('results_simulation.csv',header=TRUE, stringsAsFactors = TRUE)
+
+
+```
+
+```{r Setting data frame factors}
+unreal$Subject<-as.factor(as.character(unreal$Subject))
+unreal$Level<-as.factor(as.character(unreal$Level))
+unreal$Domain<-factor(unreal$Domain,levels=c("Nature","Self","Perception"))
+unreal$b_domain<-factor(unreal$b_domain,levels=c("Baseline","Nature","Self","Perception"))
+unreal$original_condition_names<-factor(unreal$original_condition_names,levels=c("Heavy","Light","Fast","Shrink","Grow","Delay","Unsaturated","Saturated","Ripple"))
+
+#giving each sub a new number that is nicer to display in plots
+participant_levels<-as.character(c(1:63))
+unreal <- unreal %>% mutate(Participants = group_indices(., Subject))
+unreal$Participants<-factor(as.character(unreal$Participants),levels=c("1","2","3","4","5","6","7","8","9","10","11","12","13","14","15","16","17","18","19","20","21","22","23","24","25","26","27","28","29","30","31", "32","33","34","35","36","37","38","39","40","41","42","43","44","45","46","47","48","49","50","51","52","53","54","55","56","57","58","59","60","61","62","63"))
+
+#giving each sub a new number that is nicer to display in plots
+all_behave_mean <- all_behave_mean %>% mutate(Participants = group_indices(., Subject))
+all_behave_mean$Participants<-factor(as.character(all_behave_mean$Participants),levels=c("1","2","3","4","5","6","7","8","9","10","11","12","13","14","15","16","17","18","19","20","21","22","23","24","25","26","27","28","29","30","31", "32","33","34","35","36","37","38","39","40","41","42","43","44","45","46","47","48","49","50","51","52","53","54","55","56","57","58","59","60","61","62","63"))
+
+rsl$Domain<-factor(rsl$Domain,levels=c("Nature","Self","Perception"))
+rsl$b_domain<-factor(rsl$b_domain,levels=c("Baseline","Nature","Self","Perception"))
+rsl$original_condition_names<-factor(rsl$original_condition_names,levels=c("Heavy","Light","Fast","Shrink","Grow","Delay","Unsaturated","Saturated","Ripple"))
+order=c("Experiment 1","Replication","All Subjects")
+rsl$Study<- factor(rsl$Study, levels = order)
+rsl$Level<-as.factor(as.character(rsl$Level))
+
+# If relevant
+replication<-rsl[rsl$Study=="Replication",]
+exploration<-rsl[rsl$Study=="Experiment 1",]
+all_subs<-rsl[rsl$Study=="All Subjects",]
+
+
+#
+unreal_wide <- unreal %>%
+  pivot_wider(names_from = TrialType, values_from = RealityRating)
+
+
+# Mutate to add min-max normalized StimVal column
+unreal <- unreal %>%
+  group_by(original_condition_names) %>%
+  mutate(StimVal_norm = min_max_norm(StimVal)) %>%
+  ungroup()
+
+avg_unreal <- ddply(unreal, .(Level,Subject,original_condition_names,Domain),summarise,mean_norm=mean(minmaxnorm),sd_norm=sd(minmaxnorm),mean_rating=mean(RealityRating),sd_r=sd(RealityRating),u_ci=CI(RealityRating)[1],l_ci=CI(RealityRating)[3],u_ci_norm=CI(minmaxnorm)[1],l_ci_norm=CI(minmaxnorm)[3],length_norm=length(minmaxnorm),se_norm=sd(minmaxnorm)/sqrt(length_norm),length_r=length(RealityRating),se_r=sd(RealityRating)/sqrt(length_r),mean_norm_stim=mean(StimVal_norm),sd_stim_norm=sd(StimVal_norm),mean_stim=mean(StimVal),sd_stim=sd(StimVal))
+
+
+```
+
+```{r Calculating data frames for plotting}
+
+sum_domain <- ddply(rsl, .(Level,Study,Subject,Domain),summarise,mean_z=mean(z_score),sd_z=sd(z_score),mean_rating=mean(RealityRating),sd_r=sd(RealityRating),median_rating=median(RealityRating),u_ci=CI(RealityRating)[1],l_ci=CI(RealityRating)[3],u_ci_z=CI(z_score)[1],l_ci_z=CI(z_score)[3],length_z=length(z_score),se_z=sd(z_score)/sqrt(length_z),length_r=length(RealityRating),se_r=sd(RealityRating)/sqrt(length_r),mean_norm=mean(minmaxnorm),sd_norm=sd(minmaxnorm))
+
+sum_b_domain <- ddply(unreal, .(TrialType,Study,Subject,b_domain),summarise,mean_rating=mean(RealityRating),sd_r=sd(RealityRating))
+
+sum_gen <- ddply(rsl, .(Level,Study,Subject),summarise,mean_z=mean(z_score),sd_z=sd(z_score),mean_rating=mean(RealityRating),sd_r=sd(RealityRating),u_ci=CI(RealityRating)[1],l_ci=CI(RealityRating)[3],u_ci_z=CI(z_score)[1],l_ci_z=CI(z_score)[3],length_z=length(z_score),se_z=sd(z_score)/sqrt(length_z),length_r=length(RealityRating),se_r=sd(RealityRating)/sqrt(length_r),mean_norm=mean(minmaxnorm),sd_norm=sd(minmaxnorm))
+
+sum_condition <- ddply(rsl, .(Level,Study,Subject,original_condition_names,Domain),summarise,mean_z=mean(z_score),sd_z=sd(z_score),mean_rating=mean(RealityRating),sd_r=sd(RealityRating),u_ci=CI(RealityRating)[1],l_ci=CI(RealityRating)[3],u_ci_z=CI(z_score)[1],l_ci_z=CI(z_score)[3],length_z=length(z_score),se_z=sd(z_score)/sqrt(length_z),length_r=length(RealityRating),se_r=sd(RealityRating)/sqrt(length_r),mean_norm=mean(minmaxnorm),sd_norm=sd(minmaxnorm))
+
+order=c("Experiment 1","Replication","All Subjects")
+sum_domain$Study<- factor(sum_domain$Study, levels = order)
+sum_gen$Study<- factor(sum_gen$Study, levels = order)
+sum_condition$Study<- factor(sum_condition$Study, levels = order)
+
+mean_ratings_s.d<-ddply(unreal, .(Subject,Domain),summarise,rating_average=mean(RealityRating))
+mean_ratings_domain<-ddply(unreal, .(Subject,Domain,Level),summarise,rating_average=mean(RealityRating))
+mean_ratings_study<-ddply(unreal, .(Study,Level),summarise,rating_average=mean(RealityRating),rating_sd=sd(RealityRating))
+mean_ratings_all<-ddply(unreal, .(Level),summarise,rating_average=mean(RealityRating),rating_sd=sd(RealityRating))
+
+ratings_domain_level_wide<-mean_ratings_domain %>% pivot_wider(
+    names_from = c(Domain,Level),
+    values_from = c(rating_average),
+    values_fill = NA)
+
+ratings_domain_wide<-mean_ratings_s.d %>% pivot_wider(
+    names_from = c(Domain),
+    values_from = c(rating_average,),
+    values_fill = NA)
+
+#for diffs - algebraic slopes as diffs between 0-1
+ ratings_domain_level_wide$Self_diff<-ratings_domain_level_wide$Self_0-ratings_domain_level_wide$Self_1
+ ratings_domain_level_wide$Nature_diff<-ratings_domain_level_wide$Nature_0-ratings_domain_level_wide$Nature_1
+ ratings_domain_level_wide$Perception_diff<-ratings_domain_level_wide$Perception_0-ratings_domain_level_wide$Perception_1
+ ratings_d.l.corr<-ratings_domain_level_wide[,c(1,17:19)]
+ ratings_domain_wide$Subject<-factor(as.character(ratings_domain_wide$Subject))
+
+  sum_condition$Study<-as.character(sum_condition$Study)
+  
+# First, let's modify the sum_condition data frame
+  sum_condition_modified <- sum_condition %>%
+  mutate(Study = case_when(
+    Study == "Experiment 1" ~ "Exp 1",
+    Study == "Replication" ~ "Rep",
+    Study == "All Subjects" ~ "All subs",
+    TRUE ~ Study  # This keeps any other values unchanged
+  ))
+
+sum_condition_modified$Study<-factor(sum_condition_modified$Study,levels=c("Exp 1","Rep", "All subs"))
+
+sum_domain$Study<-as.character(sum_domain$Study)
+# First, let's modify the sum_condition data frame
+sum_domain_modified <- sum_domain %>%
+  mutate(Study = case_when(
+    Study == "Experiment 1" ~ "Exp 1",
+    Study == "Replication" ~ "Exp 2",
+    Study == "All Subjects" ~ "Combined",
+    TRUE ~ Study  # This keeps any other values unchanged
+  ))
+
+sum_domain_modified$Study<-factor(sum_domain_modified$Study,levels=c("Exp 1","Exp 2", "Combined"))
+
+#scaling predictions to 0-100
+all_behave_mean$pred<-all_behave_mean$pred*100
+all_behave_mean$Domain<-factor(all_behave_mean$Domain,levels = c("Nature","Self","Perception"))
+
+
+#create df's for a model comparing bar plot figure
+avg_all_behave <- ddply(all_behave_mean, .(Level,Study,Subject,Domain),summarise,mean_rating=mean(RealityRating),sd_r=sd(RealityRating),u_ci=CI(RealityRating)[1],l_ci=CI(RealityRating)[3],length_r=length(RealityRating),se_r=sd(RealityRating)/sqrt(length_r),mean_pred=mean(pred),sd_p=sd(pred))
+avg_preds<-ddply(all_behave_mean,.(Level,Subject,Domain),summarise,mean_pred=mean(pred),sd_pred=sd(pred),u_ci=CI(pred)[1],l_ci=CI(pred)[3],CI_diff=u_ci-l_ci)
+
+avg_all_behave$Domain<-factor(avg_all_behave$Domain,levels = c("Nature","Self","Perception"))
+avg_all_behave$Level<-as.factor(as.character(avg_all_behave$Level))
+avg_all_behave$Subject<-as.factor(as.character(avg_all_behave$Subject))
+
+
+avg_avg_preds<-ddply(avg_preds,.(Subject,Domain),summarise,mean_mean_pred=mean(mean_pred))
+sd_mean_pred<-ddply(avg_avg_preds,.(Domain),summarise,sd_mean_pred=sd(mean_mean_pred))
+avg_avg_avg_preds<-ddply(avg_avg_preds,.(Domain),summarise,mean_mean_mean_pred=mean(mean_mean_pred),length_p=63)
+avg_avg_avg_preds$sd_pred<-sd_mean_pred$sd_mean_pred
+avg_avg_avg_preds$SEM<-avg_avg_avg_preds$sd_pred/sqrt(avg_avg_avg_preds$length_p)
+
+```
+
+```{r Descriptive psychophysics table }
+
+#we want to see these measures are stable across conditions
+
+#removing slow trials from Exp 1 data
+#psych_all<-psych_all[psych_all$Condition!="Slow",]
+
+ subset_psych_all<-psych_all[,c(2,4,5,7)]
+
+#table of the average jnd values per participant per condition (63 x 9)
+ psych_all_wide<-subset_psych_all %>% filter (Level %in% 2) %>% pivot_wider(
+     names_from = c(Condition),
+     values_from = c(adjusted_stim_val),
+     values_fill = NA)
+ 
+ #the mean and standard deviation of each condition
+ mean_jnds_all<-colMeans(psych_all_wide[,c(3:11)])
+ std_jnds_all<-apply(psych_all_wide[,c(3:11)],2, sd)
+
+#what was the range min,average and max r squared?
+ summary(psych_all$pr2)
+
+#get the mean value for each level-subject-condition
+ psy <- aggregate(StimVal ~ Level+Subject+ConditionName, data = unreal, FUN = mean)
+ unreal_rating_summary <- aggregate(RealityRating ~ Level, data = unreal, FUN = mean)
+
+psych_all_wide<-subset_psych_all %>% filter (Level %in% 2) %>% pivot_wider(
+    names_from = c(Condition),
+    values_from = c(adjusted_stim_val),
+    values_fill = NA)
+
+#table of the average JNDs per participant condition (63 x 9)
+psy_wide<-psy %>% filter (Level %in% 2) %>% pivot_wider(
+    names_from = c(ConditionName),
+    values_from = c(StimVal),
+    values_fill = NA)
+
+#get the mean and sd of each conditions jnd
+mean_jnds<-lapply(psy_wide[,c(3:11)],FUN=mean)
+sd_jnds<-lapply(psy_wide[,c(3:11)],FUN=sd)
+min_jnds<-lapply(psy_wide[,c(3:11)],FUN=min)
+max_jnds<-lapply(psy_wide[,c(3:11)],FUN=max)
+
+mean_jnds<-as.data.frame(mean_jnds)
+sd_jnds<-as.data.frame(sd_jnds)
+
+coef_var<-sd_jnds[,1:9]/mean_jnds[,1:9]
+
+coef_var<-as.data.frame(coef_var)  
+min_jnds<-as.data.frame(min_jnds)
+max_jnds<-as.data.frame(max_jnds)
+
+jnd_descriptives<-rbind(mean_jnds,sd_jnds,coef_var,min_jnds,max_jnds)
+row.names(jnd_descriptives)[1]<-"Mean"
+row.names(jnd_descriptives)[2]<-"SD"
+row.names(jnd_descriptives)[3]<-"Coef Var"
+row.names(jnd_descriptives)[4]<-"Min"
+row.names(jnd_descriptives)[5]<-"Max"
+ 
+jnd_descriptives<-round(jnd_descriptives,3)
+
+jnd_descriptives[,10]<-row.names(jnd_descriptives)
+jnd_descriptives<-jnd_descriptives[,c("V10","Grow","Shrink","Delay","Fast","Heavy","Light","Saturated","Unsaturated","Ripple")]
+
+customGreen = "#2fd64b"
+
+customBlue = "#4b2fd6"
+
+customRed = "#d64b2f"
+
+
+#table for subject wise jnd's
+psych_all_wide<-psych_all_wide[,c("Subject","Grow","Shrink","Delay","Fast","Heavy","Light","Saturated","Unsaturated","Ripple")]
+
+psych_all_wide[,2:10]<-round(psych_all_wide[,2:10],3)
+
+
+psych_all_wide<-as.data.frame(psych_all_wide)
+
+colnames(jnd_descriptives)[1]<-"Subject"
+psych_all_wide<-rbind(psych_all_wide,jnd_descriptives)
+psych_all_wide[,2:10]<-abs(psych_all_wide[,2:10])
+
+gt_jnd_sub<-gt(psych_all_wide,auto_align = FALSE) 
+
+gt_jnd_sub<-gt_jnd_sub|>
+  tab_header(
+    title = md("**psychophysics descriptives**")
+  )|>
+  tab_style(
+    style = list(cell_fill("lightgrey"),
+      cell_text(weight = "bold",size=12)
+      ),
+    locations = cells_body(
+      rows = c(64,65,66,67,68)
+    )
+  )|>
+  tab_style(
+    style = list(cell_text(size = 11.5)
+      ),
+    locations = cells_body(
+      rows = c(1:63)
+    )
+  )
+
+gt_jnd_sub
+
+
+# gt_mean_sd_jnd<-gt(jnd_descriptive,auto_align = FALSE)
+sum_psys<-psych_all_wide[64:68,]
+colnames(sum_psys)[1]<-"Condition"
+
+############################################# just the tip
+gt_jnd_summ<-gt(sum_psys,auto_align = FALSE)|>tab_header(title = md("**virtual hallucination JNDs**"))
+
+gt_jnd_summ
+
+
+# JND CoefV's
+coef_var_df<-pivot_longer(coef_var,cols= c(1:9),
+                           names_to = "Condition", 
+                           values_to = "coef_var")
+coef_var_df$coef_var<-abs(round(coef_var_df$coef_var,3))
+
+#what are the descriptive of the coefficient of variation?
+summary(coef_var_df$coef_var)
+
+
+pdf("virtual hallucination jnds.pdf", width = 10, height = 6)  # Adjust width and height as needed
+gt::gtsave(gt_jnd_summ, filename = "virtual hallucination jnds.pdf")
+dev.off()
+```
+
+```{r Descriptive SoR rating table }
+
+domain_averages<-ddply(unreal, .(Study,Domain,Level),summarise,mean_dl=round(mean(RealityRating),2),sd_dl=round(sd(RealityRating),2))
+
+library(knitr)
+library(kableExtra)
+colnames(domain_averages)[4]<-"mean"
+colnames(domain_averages)[5]<-"sd"
+colnames(domain_averages)[3]<-"Magnitude"
+colnames(domain_averages)[1]<-"Experiment"
+
+domav_wide<-domain_averages %>% pivot_wider(
+  names_from = c(Experiment,Domain),
+    values_from = c(mean,sd))
+
+domav_wide<-domav_wide[,c(1,2,8,3,9,4,10,5,11,6,12,7,13)]
+domav_wide[ , 2:13] <- lapply(domav_wide[ , 2:13], as.character)
+
+for (i in c(2:12)){
+  for (a in c(1:5)){
+ domav_wide[a,i]<-paste0(domav_wide[a,i]," \u00B1 ",domav_wide[a,i+1]) 
+}}
+
+colnames(domav_wide)[2]<-"M \u00B1 SD"
+colnames(domav_wide)[4]<-"M \u00B1 SD"
+colnames(domav_wide)[6]<-"M \u00B1 SD"
+colnames(domav_wide)[8]<-"M \u00B1 SD"
+colnames(domav_wide)[10]<-"M \u00B1 SD"
+colnames(domav_wide)[12]<-"M \u00B1 SD"
+colnames(domav_wide)[3]<-"SD"
+colnames(domav_wide)[5]<-"SD"
+colnames(domav_wide)[7]<-"SD"
+colnames(domav_wide)[9]<-"SD"
+colnames(domav_wide)[11]<-"SD"
+colnames(domav_wide)[13]<-"SD"
+
+domav_less<-domav_wide[,c(1,2,4,6,8,10,12)]
+
+#html_file<-"sor rating table 1.8.24.html"
+
+kable(domav_less,align = 'c',caption = "Average ratings by domain and magnitude") %>%
+  kable_classic("striped", full_width = F, html_font = "Cambria") %>%
+   
+  add_header_above(c(" " = 1,"Nature" = 1, "Self" = 1, "Perception" = 1, "Nature" = 1, "Self" = 1, "Perception" = 1)) %>%
+add_header_above(c(" " = 1, "Exp 1" = 3, "Rep" = 3))%>%
+  kable_styling(font_size = 20,html_font = 'sans-serif')%>%
+
+#save_kable(file =html_file , self_contained = T)
+
+library(webshot2)
+#webshot(html_file,file = "sor_rating_table.png",delay=2,zoom=2)
+```
+
+```{r Internal validation plots }
+
+#1.descriptive plot of the threshold values across conditions
+
+ ggplot(rsl,aes(x=StimVal, y=RealityRating))+
+ geom_point(aes(color=as.factor(Level)),alpha=0.25)+theme_gray()+ylab("SoR")+
+ geom_smooth(color='black',alpha=0.45)+ggh4x::facet_grid2(Study~original_condition_names,scales = "free")+theme(
+ strip.text = element_text(face = "bold", size = 12),
+ strip.background = element_rect(fill = "white", colour = "white", size = 1))+Ugly_theme()
+
+
+
+#2.connected dot descriptive plot of the threshold values across conditions
+ggplot(avg_unreal, aes(x =mean_stim, y=mean_norm,color=Level))+geom_point()+
+  geom_line(aes(group = Subject), alpha = 0.3) +
+  scale_alpha_manual(values = c("0" = 0, "1" = 0.05, "2" = 0.3,"3"=0.75,"4"=1)) +
+  facet_wrap(~original_condition_names, scales = "free_x") +
+  labs(
+    x = "Stimuli Values",
+    y = "SoR",
+    title = "Ratings vs Stimuli") +
+  theme_minimal() +
+  theme(
+    panel.grid.major = element_line(color = "gray90"),
+    panel.grid.minor = element_line(color = "gray95"),plot.title = element_text(hjust=0.5)
+  )
+#3.
+ggplot(avg_unreal, aes(x = mean_norm_stim, y = mean_norm, color = Level)) +
+  # Add lines for each subject
+  geom_line(aes(group = Subject), alpha = 0.3) +
+  # Add points
+  geom_point(alpha = 0.55) +
+  # Add smooth trend line
+  geom_smooth(method = "loess", se = FALSE, linetype = "dashed") +
+  # Facet by condition
+  facet_wrap(~original_condition_names, scales = "free_x") +
+  # Labels and title
+  labs(
+    x = "Stimuli Values (Min-Max Normalized)",
+    y = "Ratings (0-1)",
+    title = "Scatter Plot of Ratings vs Normalized Stimuli",
+    subtitle = "Grouped by Subject and Condition"
+  ) +
+  # Theme
+  theme_minimal() +
+  theme(
+    panel.grid.major = element_line(color = "gray90"),
+    panel.grid.minor = element_line(color = "gray95")
+  )
+
+#4. Scatter Plot of Ratings vs Normalized Stimuli by level
+ggplot(avg_unreal %>% filter(Level != "0"), 
+       aes(x = mean_norm_stim, y = mean_norm, color = Subject)) +
+  # Add points
+  geom_point(alpha = 0.55) +
+  # Facet by condition and level
+  facet_grid(Level ~ original_condition_names, scales = "free_x") +
+  # Labels and title
+  labs(
+    title = "Scatter Plot of Ratings vs Normalized Stimuli",
+    subtitle = "Grouped by Subject, Condition, and Level"
+  ) +
+  # Theme
+  theme_minimal() +
+  theme(
+    panel.grid.major = element_line(color = "gray90"),
+    panel.grid.minor = element_line(color = "gray95"),
+    legend.position = "none",  # Remove legend
+    axis.title = element_blank(),  # Remove axis titles
+    strip.text = element_text(size = 8),  # Reduce facet label size
+    axis.text = element_text(size = 6),  # Reduce axis text size
+    plot.title = element_text(size = 12),  # Reduce title size
+    plot.subtitle = element_text(size = 10)  # Reduce subtitle size
+  )# +
+  # Adjust the aspect ratio of the plot
+  coord_fixed(ratio = 1)
+
+#5. density plots of thresholds 
+stim_dens<-ggplot(rsl%>%filter(TrialType!='Baseline'), aes(x = StimVal)) +
+   ylab("Density") +
+   xlab("Stimuli") +
+   stat_density(color="black",aes( alpha = Level,fill=Domain), position = "identity") +
+   scale_fill_manual(values = c("Self" = "#d64b2f", "Nature" = "#2fd64b", "Perception" = "#4b2fd6")) +
+   scale_alpha_manual(values = c("1" = 0.1, "2" = 0.4, "3" = 0.7, "4" = 1)) +
+   ggh4x::facet_grid2(Study ~ original_condition_names, scales = "free", independent = "y", space = "fixed") +
+   Ugly_theme()+theme(plot.title = element_text(vjust=4),strip.background = element_blank(),strip.text = element_text(size=10),axis.text=element_text(size=4),legend.position = "bottom")+
+  guides(fill = guide_legend(override.aes = list(alpha = 0.95),title = "domain"), 
+         alpha = guide_legend(override.aes = list(fill = "grey50"),title = "magnitude"))+ggtitle("VH stimuli magnitude distributions")
+
+#6. histogram of raw SoR ratings
+
+ggplot(unreal %>% filter (TrialType %in% "Baseline"),aes(x=RealityRating))+geom_histogram(color="black",fill="gray",binwidth=5)+facet_wrap(vars(Subject),nrow=4)+theme(strip.text = element_text(face = "bold", size = rel(0.6)),strip.background = element_rect(fill = "white", colour = "white", linewidth = 1))
+
+#7.Compare Altered\Unaltered mean rating by subject
+
+trialtype_sum<-ddply(unreal, .(Study,Subject,TrialType),summarise,trial_average=mean(RealityRating))
+trialtype_sum$TrialType<-as.factor(trialtype_sum$TrialType)
+trialtype_sum$Subject<-as.factor(trialtype_sum$Subject)
+Unaltered <- subset(trialtype_sum,  TrialType == "Baseline", trial_average,drop = TRUE)
+Altered <- subset(trialtype_sum,  TrialType == "Trial", trial_average,drop = TRUE)
+pd <- paired(Unaltered, Altered)
+plot(paired(Unaltered, Altered), type = "profile") + Ugly_theme()+ylim(0,100)
+
+#8. scatter plot of Altered\Unaltered ratings
+ ggplot(sum_b_domain, aes(x=TrialType, y=mean_rating,color=b_domain))+
+ stat_summary(fun=mean, geom="point", shape=16,size=1, width=0.49, alpha=0.5,position="jitter",aes(group=interaction(Subject,TrialType,b_domain)))+
+ scale_colour_manual(values = c("Nature" = "#2fd64b","Perception"="#4b2fd6","Self"="#d64b2f","Baseline"="gray"),name="Domain")+
+ ylab("Rating")+
+ xlab("Trial Type")+
+ scale_x_discrete(labels = c('Unaltered','Altered')) +
+ Ugly_theme()#+
+ ggtitle("Altered vs Unaltered")#+facet_wrap(vars(Study))
+
+```
+
+```{r Supplementary plots }
+
+#supp 1 VH magnitude effect
+
+# Create line plot with CI 95%
+create_plot <- function(data, title) {
+  ggplot(data, aes(x = as.numeric(Level), y = mean_norm*100)) +
+    stat_summary(fun = mean, geom = "line", color = "black", show.legend = FALSE, linewidth = 1) +
+    ylab("Sense of Reality") +
+    ylim(0, 100) +
+    xlab("Magnitude") +
+    scale_x_continuous(breaks = 1:5, labels = c('0','1','2','3','4')) +
+    stat_summary(geom = "ribbon", 
+                 fun.data = function(y) {
+                   out <- smean.cl.boot(y, conf.int = 0.95)
+                   data.frame(ymin = out["Lower"], ymax = out["Upper"], y = out["Mean"])
+                 }, 
+                 alpha = 0.4) +
+    geom_jitter(width = 0.2, aes(x = as.numeric(Level), y = mean_norm*100), size = 1, alpha = 0.2, show.legend = FALSE) +
+    ggtitle(title) +
+    Ugly_theme()
+}
+
+supp2.A1 <- create_plot(sum_gen %>% filter(Study == "Experiment 1"), "Exp 1")#+geom_bracket(xmin = "0", xmax = "4", y.position = 0.95,label = "****")
+supp.A2 <- create_plot(sum_gen %>% filter(Study == "Replication"), "Exp 2")#+geom_bracket(xmin = "0", xmax = "4", y.position = 0.95,label = "****")
+supp.A3 <- create_plot(sum_gen %>% filter(Study == "All Subjects"), "Combined")#+geom_bracket(xmin = "0", xmax = "4", y.position = 0.95,label = "****")
+
+
+supp2.A <- cowplot::plot_grid(plotlist = list(supp2.A1, supp.A2, supp.A3), rel_heights = c(1,1,1), ncol = 3)
+supp2.A<-supp2.A+ggtitle("Main effect of VH magnitude")+theme(plot.title = element_text(hjust=0.5,vjust=-10,size=25))
+# Display the combined plot
+print(supp2.A)
+
+
+
+# supp 2 figure of SoR by conditions
+
+create_condition_plot <- function(data, title) {
+  ggplot(data, aes(x = as.numeric(Level), y = mean_norm*100, fill = original_condition_names)) +
+    scale_fill_manual(values = c(
+      "Fast" = "#1e9a33", "Light" = "#2fd64b", "Heavy" = "#6fe382",
+      "Saturated" = "#331e9a", "Unsaturated" = "#4b2fd6", "Ripple" = "#826fe3",
+      "Grow" = "#9a331e", "Shrink" = "#d64b2f", "Delay" = "#e3826f"
+    )) +
+    stat_summary(fun = mean, geom = "line", aes(color = original_condition_names), size = 1) +
+    #geom_jitter(width = 0.2, aes(x = Level, y = mean_norm*100), color = "black", shape = 21, size = 2, alpha = 0.3, show.legend = FALSE) +
+    stat_summary(aes(group = original_condition_names), fun = "mean", position = position_dodge(width = 0),  
+                 geom = "point", color = 'black', shape = 21, size = 3.5, alpha = 0.9) +
+    stat_summary(aes(x = Level, y = mean_norm*100, color = original_condition_names, fill = original_condition_names),
+                 fun.data = "mean_cl_boot",
+                 position = position_dodge(width = 0), geom = "errorbar", width = 0.3) +
+    scale_color_manual(values = c(
+      "Fast" = "#1e9a33", "Light" = "#2fd64b", "Heavy" = "#6fe382",
+      "Saturated" = "#331e9a", "Unsaturated" = "#4b2fd6", "Ripple" = "#826fe3",
+      "Grow" = "#9a331e", "Shrink" = "#d64b2f", "Delay" = "#e3826f"
+    )) +
+    ylab("sense of reality") +
+    xlab("magnitude") +
+    ggtitle(title) +
+    scale_x_discrete(labels = c('0', '1', '2', '3', '4')) +
+    stat_summary(geom = "ribbon", fun.data = "mean_cl_boot", alpha = 0.15, show.legend = FALSE) +
+    Ugly_theme(base_size = 20) +
+    theme(
+      axis.text=element_text(family="sans"),
+      legend.position = "right",
+      legend.text = element_text(size = 8),
+      strip.background = element_blank(),
+      strip.text = element_text(size=15),
+      plot.title = element_text(vjust = 1.2)
+    ) +ylim(0,100)+
+    guides(fill = guide_legend(title = "Condition"), color = guide_legend(title = "Condition")) +
+    facet_wrap(vars(Study))
+}
+
+# Create the plot
+s2<-create_condition_plot(sum_condition_modified, " ")
+
+# supp 3 same plot with facets by domain
+create_condition_domain_plot <- function(data, title) {
+  ggplot(data, aes(x = as.numeric(Level), y = mean_norm*100, fill = original_condition_names)) +
+    scale_fill_manual(values = c(
+      "Fast" = "#1e9a33", "Light" = "#2fd64b", "Heavy" = "#6fe382",
+      "Saturated" = "#4b2fd6", "Unsaturated" = "#826fe3", "Ripple" = "#331e9a",
+      "Grow" = "#d64b2f", "Shrink" = "#e3826f", "Delay" = "#9a331e"
+    )) +
+    stat_summary(fun = mean, geom = "line", aes(color = original_condition_names), size = 1) +
+    #geom_jitter(width = 0.2, aes(x = Level, y = mean_norm*100), color = "black", shape = 21, size = 2, alpha = 0.3, show.legend = FALSE) +
+    stat_summary(aes(group = original_condition_names), fun = "mean", position = position_dodge(width = 0),  
+                 geom = "point", color = 'black', shape = 21, size = 3.5, alpha = 0.9) +
+    stat_summary(aes(x = Level, y = mean_norm*100, color = original_condition_names, fill = original_condition_names),
+                 fun.data = "mean_cl_boot",
+                 position = position_dodge(width = 0), geom = "errorbar", width = 0.3) +
+    scale_color_manual(values = c(
+      "Fast" = "#1e9a33", "Light" = "#2fd64b", "Heavy" = "#6fe382",
+      "Saturated" = "#4b2fd6", "Unsaturated" = "#826fe3", "Ripple" = "#331e9a",
+      "Grow" = "#d64b2f", "Shrink" = "#e3826f", "Delay" = "#9a331e"
+    )) +
+    ylab("sense of reality") +
+    xlab("magnitude") +
+    ggtitle(title) +
+    scale_x_discrete(labels = c('0', '1', '2', '3', '4')) +
+    stat_summary(geom = "ribbon", fun.data = "mean_cl_boot", alpha = 0.15, show.legend = FALSE) +
+    Ugly_theme(base_size = 20) +
+    theme(
+      axis.text=element_text(family="sans"),
+      legend.position = "right",
+      legend.text = element_text(size = 8),
+      strip.background = element_blank(),
+      strip.text = element_text(size=15),
+      plot.title = element_text(vjust = 1.2)
+    ) +ylim(0,100)+
+    guides(fill = guide_legend(title = "Condition"), color = guide_legend(title = "Condition")) +
+    facet_wrap(vars(Study,Domain))
+}
+
+# Create the plot
+s3<-create_condition_domain_plot(sum_condition_modified, " ")
+
+# supp 4 comparing the domain ratings across studies 
+create_domain_study_plot <- function(data, title) {
+  ggplot(data, aes(x = as.numeric(Level), y = mean_norm*100, fill = Domain)) +
+    scale_fill_manual(values = c("Self" = "#d64b2f", "Nature" = "#2fd64b", "Perception" = "#4b2fd6")) +
+    stat_summary(fun = mean, geom = "line", 
+             aes(color = Domain, linetype = Study, group = interaction(Domain, Study)), 
+             position = position_dodge(width = 0.5), size = 1, show.legend = FALSE) +
+stat_summary(fun = mean, geom = "point", 
+             aes(fill = Domain, shape = Study, group = interaction(Domain, Study)), 
+             position = position_dodge(width = 0.5), color = "black", size = 3) +
+    stat_summary(aes(x = as.numeric(Level),group=interaction(Domain,Study), y = mean_norm*100, color = "black", fill = Domain),
+                 fun.data = "mean_cl_boot",
+                 position = position_dodge(width = 0.5), geom = "errorbar", width = 0.3) +
+    scale_shape_manual(values = c("Exp 1" = 21, "Rep" = 22, "All subs" = 24)) +
+    scale_linetype_manual(values = c("Exp 1" = 1, "Rep" = 2, "All subs" = 3)) +
+    scale_color_manual(values = c("Self" = "#d64b2f", "Nature" = "#2fd64b", "Perception" = "#4b2fd6")) +
+    ylab("sense of reality") +
+    xlab("magnitude") +
+    ggtitle(title) +
+    scale_x_discrete(labels = c('0', '1', '2', '3', '4')) +
+    stat_summary(geom = "ribbon", 
+                 fun.data = function(y) {
+                   out <- smean.cl.boot(y, conf.int = 0.95)
+                   data.frame(ymin = out["Lower"], ymax = out["Upper"], y = out["Mean"])
+                 },
+                 aes(group = Study), alpha = 0.4, show.legend = FALSE) +
+geom_jitter(aes(x = Level, y = mean_norm*100, color = Domain, fill = Domain, group = Study),
+            position = position_jitterdodge(jitter.width = 0.2, dodge.width = 0.5),
+            size = 1, alpha = 0.2, shape = 21, stroke = 0.5, show.legend = FALSE) +
+    facet_wrap(vars(Domain)) +
+    guides(shape = guide_legend(title = " "), color = FALSE, linetype = FALSE, fill = FALSE) +
+    Ugly_theme(base_size = 20)+theme(strip.background = element_blank(),axis.title=element_text(family="sans",face="plain"),axis.text=element_text(face="plain",family="sans"),strip.text = element_text(size=15),legend.title = element_text(size=12),plot.title = element_text(vjust = 1.2,family="sans",face="plain"),legend.text = element_text(size=8))+ylim(0,100)
+}
+
+# Usage
+s4<-create_domain_study_plot(sum_domain_modified, " ")
+
+# supp 5 
+create_domain_plots <- function(mean_df, unreal, mean_df_domain, title) {
+  ggplot(mean_df, aes(x = as.factor(Level), y = minmaxnorm*100, color = Domain, group = interaction(Domain, Subject))) +
+    scale_color_manual(values = c("Self" = "#d64b2f", "Nature" = "#2fd64b", "Perception" = "#4b2fd6")) +
+    scale_fill_manual(values = c("Self" = "#d64b2f", "Nature" = "#2fd64b", "Perception" = "#4b2fd6")) +
+    ylab("sense of reality") +
+    xlab("magnitude") +
+    ggtitle(title) +
+    stat_summary(fun = mean, geom = "line", show.legend = FALSE, size = 0.8, alpha = 0.1) +
+    stat_summary(data = unreal,
+                 geom = "ribbon", 
+                 fun.data = function(y) {
+                   out <- smean.cl.boot(y, conf.int = 0.95)
+                   data.frame(ymin = out["Lower"], ymax = out["Upper"], y = out["Mean"])
+                 },
+                 alpha = 0.6, show.legend = FALSE, aes(group = Domain, fill = Domain)) +
+    stat_summary(data = mean_df_domain,
+                 aes(x = as.factor(Level), y = minmaxnorm*100, color = Domain, group = Domain),
+                 fun = "loess", geom = "smooth", size = 1) +
+    geom_point(aes(color = Domain, fill = Domain), size = 1, alpha = 0.6, show.legend = FALSE) +
+    scale_x_discrete(labels = c('0', '1', '2', '3', '4')) +
+    guides(fill = FALSE, color = FALSE) +
+    Ugly_theme(base_size = 20) +
+    theme(legend.position = "none",
+          strip.background = element_blank(),
+          axis.title = element_text(family = "sans", face = "plain"),
+          axis.text = element_text(face = "plain", family = "sans"),
+          strip.text = element_text(size = 15),
+          legend.title = element_text(size = 12),
+          plot.title = element_text(vjust = 1.2, family = "sans", face = "plain"),
+          legend.text = element_text(size = 8)) +
+    ylim(0, 100) +
+    facet_wrap(~ Domain, nrow = 1)
+}
+
+# supp 6
+s5<-create_domain_plots(mean_df, unreal, mean_df_domain, " ")
+
+ggplot(unreal, aes(x = as.factor(Level), y = minmaxnorm*100, color = Domain, group = interaction(Domain, Participants))) +
+  scale_color_manual(values = c("Self" = "#d64b2f", "Nature" = "#2fd64b", "Perception" = "#4b2fd6")) +
+  scale_fill_manual(values = c("Self" = "#d64b2f", "Nature" = "#2fd64b", "Perception" = "#4b2fd6")) +
+  ylab("Sense of Reality") +
+  xlab("Magnitude") +
+  # Individual subject mean lines
+  stat_summary(fun = mean, geom = "line", size = 1) +
+  # Mean points for each magnitude
+  stat_summary(fun = mean, geom = "point", size = 1.5, alpha = 0.5, show.legend = FALSE) +
+  # Error bars for mean points
+  stat_summary(fun.data = mean_se, geom = "errorbar", width = 0.2) +
+  scale_x_discrete(labels = c('0', '1', '2', '3', '4')) +
+  Ugly_theme(base_size = 20) +
+  theme(legend.position = "none",
+        strip.background = element_blank(),
+        axis.title = element_text(family = "sans", face = "plain"),
+        axis.text = element_text(face = "plain", family = "sans",size=10),
+        strip.text = element_text(size = 15),
+        legend.title = element_text(size = 12),
+        plot.title = element_text(vjust = 1.2, family = "sans", face = "plain"),
+        legend.text = element_text(size = 8)) +
+  facet_wrap(~ Participants, nrow = 9)
+
+
+#supp.7
+
+all_behave_mean$Domain<-as.character(all_behave_mean$Domain)
+all_behave_mean$Domain<-factor(all_behave_mean$Domain,levels = c("Nature","Self","Perception"))
+
+
+ggplot(all_behave_mean, aes(x = as.numeric(Level),group=Subject, y = pred*100,fill=Domain)) +
+
+stat_summary(fun=mean,geom="line",aes(color=Domain),size=1,alpha=0.2)+ylab("Predicted SoR")+
+
+stat_summary(geom = "ribbon", fun.data = "mean_cl_normal", fun.args = list(mult = 1), alpha = 0.1,show.legend = FALSE)+guides(color=FALSE,fill=FALSE)+
+stat_summary(geom="point",fun="mean",aes(color=Domain),size=1.5,alpha=0.3,show.legend = FALSE)+
+stat_summary(data=all_behave_mean,aes(x = as.numeric(Level), y = pred*100, color = Domain, group = Domain),fun = "mean",geom = "line",size = 1.5)+
+scale_fill_manual(values = c("Self"="#d64b2f","Nature" = "#2fd64b","Perception"="#4b2fd6"))+
+scale_color_manual(values = c("Self"="#d64b2f","Nature" = "#2fd64b","Perception"="#4b2fd6"))+
+scale_x_continuous(breaks = c(0, 1, 2, 3, 4), labels = c("0", "1", "2", "3", "4")) +
+  
+xlab("Magnitude")+theme(plot.title = element_blank())+
+
+Ugly_theme()+theme(strip.background = element_blank())+facet_wrap(vars(Domain))
+
+
+#supp 8. pivot wider by domain so that each subject has a column with mean values for each level in each domain, this way we can order by subject
+#and level and mutate
+ mean_df_domains <- ddply(unreal, .(Level, Domain, Subject), summarise, mean_rating = mean(RealityRating)) %>% pivot_wider(
+     names_from = Domain,
+     values_from = mean_rating,
+     names_prefix = "mean_rating_",
+     values_fill = 0)
+# 
+ mean_df_domains$Self_Nature<-mean_df_domains$mean_rating_Self-mean_df_domains$mean_rating_Nature
+ mean_df_domains$Perception_Self<-mean_df_domains$mean_rating_Perception-mean_df_domains$mean_rating_Self
+ mean_df_domains$Perception_Nature<-mean_df_domains$mean_rating_Perception-mean_df_domains$mean_rating_Nature
+# 
+ #now plot the mean difference between the first levels of nature and self vs the first levels of perception and self
+ natu_self_diff<-ggplot(mean_df_domains %>% filter (Level=='1') %>% arrange(desc(Self_Nature)), aes(x = Self_Nature, y = reorder(Subject,-Self_Nature), color="black",fill = "#FF6D1F")) +
+ stat_summary(geom = "bar", fun = "mean",position = position_dodge(width = 0.6), width = 0.6) +
+   stat_summary(geom = "errorbar", fun.data = mean_cl_normal, width = 0.1, color = "black",
+                position = position_dodge(width = 0.6)) +
+   labs(x = "Mean difference at 1st Lvl", y="Subject") +
+   guides(fill=FALSE,color=FALSE) +ggtitle("Slf-Nat")+Ugly_theme()+theme(axis.text.y = element_blank(),axis.ticks.y = element_blank())
+# 
+# 
+ perc_self_diff<-ggplot(mean_df_domains %>% filter (Level=='1') %>% arrange(desc(Perception_Self)), aes(x = Perception_Self, y = reorder(Subject,-Perception_Self), color="black",fill = "#FF6D1F")) +
+ stat_summary(geom = "bar", fun = "mean",position = position_dodge(width = 0.6), width = 0.6) +
+   stat_summary(geom = "errorbar", fun.data = mean_cl_normal, width = 0.1, color = "black",
+                position = position_dodge(width = 0.6)) +
+   labs(x = "", y = "Subject") +
+   xlim(-20,40)+
+   guides(fill=FALSE,color=FALSE)+
+   ggtitle("Perc-Slf")+Ugly_theme()+theme(axis.text.y = element_blank(),axis.ticks.y = element_blank())
+# 
+# 
+ perc_nat_diff<-ggplot(mean_df_domains %>% filter (Level=='1') %>% arrange(desc(Perception_Nature)), aes(x = Perception_Nature, y = reorder(Subject,-Perception_Nature),color="black", fill="#FF6D1F")) +
+ stat_summary(geom = "bar", fun = "mean",position = position_dodge(width = 0.6), width = 0.6) +
+   stat_summary(geom = "errorbar", fun.data = mean_cl_normal, width = 0.1, color = "black",
+                position = position_dodge(width = 0.6)) +
+   labs(x = "", y = "Subject") +
+   ggtitle("Perc-Nat")
+ perc_nat_diff<-perc_nat_diff+Ugly_theme()+theme(axis.text.y = element_blank(),axis.ticks.y = element_blank())+guides(fill=FALSE,color=FALSE)
+# 
+# 
+  subject_diff_between_domains_p<-cowplot::plot_grid(labels = c('D',' ',' '),label_size = 10, plotlist=list(perc_nat_diff , natu_self_diff , perc_self_diff), ncol = 3, rel_heights = c(0.1, 1),rel_widths = c(0.8))
+# 
+#  
+ subject_diff_between_domains_p
+
+ 
+ # supp 9. predicted rating vs observed subject gallery
+
+ggplot(all_behave_mean, aes(x = as.numeric(Level), y = pred,fill=Domain)) +
+scale_fill_manual(values = c("Self"="#d64b2f","Nature" = "#2fd64b","Perception"="#4b2fd6"))+
+stat_summary(fun=mean,geom="line",aes(color=Domain),size=1)+ylab("Predicted SoR")+
+stat_summary(data=unreal,fun.data="mean_cl_boot",geom="errorbar",aes(color=Domain,x=as.numeric(Level),y=minmaxnorm),size=1)+ylab("Predicted SoR")+
+scale_color_manual(values = c("Self"="#d64b2f","Nature" = "#2fd64b","Perception"="#4b2fd6"))+
+xlab("Alteration Level")+theme(plot.title = element_blank())+
+scale_x_continuous(breaks = c(1, 2, 3, 4, 5), labels = c("0", "1", "2", "3", "4")) +
+stat_summary(geom = "ribbon", fun.data = "mean_cl_normal", fun.args = list(mult = 1), alpha = 0.3,show.legend = FALSE)+guides(color=FALSE,fill=FALSE)+
+Ugly_theme_titles()+stat_summary(geom="point",fun="mean",aes(color=Domain),size=1.5,alpha=0.6,show.legend = FALSE)+facet_wrap(vars(Participants),nrow=9)
+
+
+# supp 10.
+```
+
+```{r Manuscript Figure - of minmax normalized ratings by Domain and Magnitude }
+
+# Function to create the plot
+create_domain_plot <- function(data, title) {
+  ggplot(data, aes(x = as.numeric(Level), y = mean_norm*100, fill = Domain)) +
+    scale_fill_manual(values = c("Self" = "#d64b2f", "Nature" = "#2fd64b", "Perception" = "#4b2fd6")) +
+    stat_summary(fun = mean, geom = "line", aes(color = Domain), linewidth = 1) +
+     geom_jitter(width = 0.2, aes(x = Level, y = mean_norm*100), color = "black", shape = 21, size = 2, alpha = 0.3, show.legend = FALSE) +
+    stat_summary(aes(group = Domain), fun = "mean", position = position_dodge(width = 0),  
+                 geom = "point", color = 'black', shape = 21, size = 4, alpha = 0.9) +
+    stat_summary(aes(x = Level, y = mean_norm*100, color = Domain, fill = Domain),
+                 fun.data = "mean_cl_boot",
+                 position = position_dodge(width = 0), geom = "errorbar", width = 0.3) +
+    scale_color_manual(values = c("Self" = "#d64b2f", "Nature" = "#2fd64b", "Perception" = "#4b2fd6")) +
+    ylab("Sense of Reality") +
+    xlab("Magnitude") +
+    ggtitle(title) +
+    scale_x_discrete(labels = c('0','1','2','3','4')) +
+    stat_summary(geom = "ribbon", 
+                 fun.data = function(y) {
+                   out <- smean.cl.boot(y, conf.int = 0.95)
+                   data.frame(ymin = out["Lower"], ymax = out["Upper"], y = out["Mean"])
+                 }, 
+                 alpha = 0.3, show.legend = FALSE) +
+    guides(fill = FALSE, color = FALSE) +
+    Ugly_theme(base_size = 20) +
+    theme(plot.title = element_text(vjust = 1.2))
+}
+
+# Create the three plots
+Figure2.A1 <- create_domain_plot(sum_domain %>% filter(Study == "Experiment 1"), "Exp 1")
+Figure2.A2 <- create_domain_plot(sum_domain %>% filter(Study == "Replication"), "Exp 2")
+Figure2.A3 <- create_domain_plot(sum_domain %>% filter(Study == "All Subjects"), "Combined")
+
+# Display the plots
+print(Figure2.A1)
+print(Figure2.A2)
+print(Figure2.A3)
+
+# Combine the plots
+Figure2.A <- cowplot::plot_grid(plotlist = list(Figure2.A1, Figure2.A2, Figure2.A3), rel_heights = c(1,1,1), ncol = 3)
+
+ ggsave('Figure 2 new error bars got erased .png',dpi=600,limitsize=FALSE,plot=Figure2.A,width = 10,height = 10,units = "in")
+#print(Figure2.A)
+
+```
+
+```{r generating Bayesian model predictions and free parameter optimization}
+
+
+#chosen scaling of model stimuli
+stim_v=(c(0.1,1,2,3,4))
+
+#alternative scalings
+#stim_v=(c(0,1,2,3,4))
+#stim_v<-c(0,1.75,2,2.25,3)
+#stim_v=(c(0.1,1.75,2,2.25,4))
+
+all_behave_mean$level_adj = stim_v[1]
+all_behave_mean$level_adj[all_behave_mean$Level==1] = stim_v[2]
+all_behave_mean$level_adj[all_behave_mean$Level==2] = stim_v[3]
+all_behave_mean$level_adj[all_behave_mean$Level==3] = stim_v[4]
+all_behave_mean$level_adj[all_behave_mean$Level==4] = stim_v[5]
+
+DataSigma = sqrt( var(c(all_behave_mean$level_adj,-all_behave_mean$level_adj)))
+
+
+CoefFit = data.frame(Subject=-1,Domain="test",RMSD=0,sigma=0,p0=0,lambda=0,delta=0,alpha = 0,K = 0)
+
+all_behave_mean$pred = 0
+
+for (SubNum in unique(all_behave_mean$Subject)){
+      
+this_data = all_behave_mean%>%filter(Subject==SubNum)
+
+res<-  optim(par = c(0.5, 0.5,0.5,0.5,0.5,0.5, 0.5,0.5, 0.2,1,1), fn=BImodel, data = this_data, lower=c(0.01,0.01,0.01,0.01,0.01,0.01,0.01,0.01,0.01,0.4,0.2), upper=c(DataSigma,DataSigma,DataSigma,0.9,0.9,0.9,0.9,0.9,0.9,4,6), method="L-BFGS-B")
+
+Val = 0
+  for (ThisDomain in c("Perception","Nature","Self")){
+
+  sigma = res$par[1+Val]
+  p0_real = res$par[4+Val]
+  lambda=res$par[7+Val]
+  delta = as.numeric(res$par[10])
+  alpha = res$par[11]
+  simga_real = DataSigma
+  
+  ThisK=(sigma^2*(sigma^2+simga_real^2))/simga_real^2*
+    (2*log(p0_real/(1-p0_real))+log((sigma^2+simga_real^2)/sigma^2))
+  ##########<<<Important detail: this is where K is turned into the square root - k (the perceptual decision criterion) >>>##########
+  ThisK=sqrt(ThisK) #K turns into small k but is saved in Big K
+  ############################################################
+CoefFit<-rbind(CoefFit,c(SubNum,ThisDomain,as.numeric(res$val),sigma,p0_real,lambda,delta,alpha,as.numeric(ThisK)))
+
+all_behave_mean[all_behave_mean$Subject==SubNum & all_behave_mean$Domain == ThisDomain,23]<-ProbRealCalc(this_data$level_adj[this_data$Domain == ThisDomain],sigma,p0_real,lambda,delta,alpha,DataSigma)
+
+Val = Val+1
+  }
+
+}
+
+#Some editing is needed for the fit data frame
+CoefFit<-CoefFit[-1,]
+CoefFit$k<-as.numeric(CoefFit$K) #Changing the column name to small k
+CoefFit$RMSD<-as.numeric(CoefFit$RMSD)
+CoefFit$sigma<-as.numeric(CoefFit$sigma)
+CoefFit$p0<-as.numeric(CoefFit$p0)
+CoefFit$lambda<-as.numeric(CoefFit$lambda)
+order=c("Nature","Self","Perception")
+CoefFit$Domain<- factor(CoefFit$Domain, levels = order)
+CoefFit<-CoefFit%>%filter(K<100)
+
+#Save the model fit
+response <- readline(prompt="Would you like to run this section? (y/n): ")
+if(tolower(response) == "y") {
+  write.csv(CoefFit,'ModelFit 30.10.24.csv')
+  write.csv(all_behave_mean,'preds 30.10.24.csv' )
+
+}
+
+
+```
+
+```{r generating a Bootstraped simulation of the Bayesian model}
+stim_v=(c(0.1,1,2,3,4))
+results_simulations=data.frame(Domain='test',Evidence=-5, EvidenceTrans=-5,Pred=-5)
+NumSim = 200
+
+for (DomainName in c("Nature","Self","Perception" )){
+  ThisCoef<-CoefFit%>%filter(Domain==DomainName)
+  rndInd<-round(runif(NumSim,min=1,max = nrow(ThisCoef)-1));
+  sigma_v=ThisCoef$sigma[rndInd]
+  p0_v=ThisCoef$p0[rndInd]
+  lambda_v=ThisCoef$lambda[rndInd]
+  
+  delta_v=as.numeric(ThisCoef$delta[rndInd])
+  alpha_v = as.numeric(ThisCoef$alpha[rndInd])
+ for (RepNum in 1:NumSim){
+  for (i in 1:5){
+    ProbRealPred=ProbRealCalc(stim=stim_v[i],sigma=sigma_v[RepNum],p0_real=p0_v[RepNum],lambda=lambda_v[RepNum],delta=delta_v[RepNum],alpha = alpha_v[RepNum],simga_real=DataSigma)
+    results_simulations<-rbind(results_simulations,c(DomainName,as.numeric(stim_v[i]),as.numeric(i),as.numeric(ProbRealPred)))
+  } 
+ } 
+}
+
+results_simulations<-results_simulations[-1,]
+results_simulations<-results_simulations%>%filter(Pred < 1)
+
+#adding magnitude levels as characters
+results_simulations$Magnitude<-results_simulations$EvidenceTrans
+results_simulations$Magnitude<-as.character(results_simulations$Magnitude)
+results_simulations[results_simulations$EvidenceTrans=="1",]$Magnitude<-0
+results_simulations[results_simulations$EvidenceTrans=="2",]$Magnitude<-1
+results_simulations[results_simulations$EvidenceTrans=="3",]$Magnitude<-2
+results_simulations[results_simulations$EvidenceTrans=="4",]$Magnitude<-3
+results_simulations[results_simulations$EvidenceTrans=="5",]$Magnitude<-4
+
+results_simulations$EvidenceTrans<-as.numeric(results_simulations$EvidenceTrans)
+write.csv(results_simulations,'results_simulation.csv' )
+```
+
+```{r Manuscript Figure - Barplot comparing the model average predictions with observed average ratings}
+#Note: here we do not use CI or SD but SEM since otherwise the overlay won't look good
+
+#check homogeneity assumption
+levene_test(data=avg_all_behave,mean_pred~Domain)
+
+
+nature_tile <- data.frame(
+  Domain = "Nature",
+  x = "Nature",
+  y = avg_avg_avg_preds$mean_mean_mean_pred[1],  # Specify the y position
+  height = round(avg_avg_avg_preds$SEM[1]*2,2)
+  # Specify the height
+)
+
+self_tile <- data.frame(
+  Domain = "Self",
+  x = "Self",
+  y = avg_avg_avg_preds$mean_mean_mean_pred[2],  # Specify the y position
+  height = round(avg_avg_avg_preds$SEM[2]*2,2)  # Specify the height
+)
+
+perception_tile <- data.frame(
+  Domain = "Perception",
+  x = "Perception",
+  y = avg_avg_avg_preds$mean_mean_mean_pred[3],  # Specify the y position
+  height = round(avg_avg_avg_preds$SEM[3]*2,2)  # Specify the height
+)
+
+
+#### ANOVA on the predicted domain differences ####
+fit_pred <- avg_all_behave %>%
+  welch_anova_test(mean_pred ~ Domain) %>% 
+  add_significance()
+
+#### Run Tukey ###
+tukey_pred <- avg_all_behave %>% 
+  tukey_hsd(mean_pred ~ Domain) %>% 
+  add_significance() %>% 
+  add_xy_position()
+
+#mixed-model
+pred_m<-lmer(mean_pred ~ Domain * Level + (Subject|Domain),data = avg_all_behave)
+
+### Plot ###
+ggplot(avg_all_behave, aes(x = Domain, y = mean_rating )) +
+  stat_summary(fun=mean,geom = "bar",position = position_dodge(1),width = 0.45,color="black",aes(fill=Domain),linewidth=1)+
+  stat_summary(fun.data="mean_se",width = 0.25,geom="errorbar",color="black") +
+  theme(legend.position = "none")+
+  scale_fill_manual(values = c("Self" = "#d64b2f", "Nature" = "#2fd64b", "Perception" = "#4b2fd6")) +
+  scale_color_manual(values = c("Self" = "#d64b2f", "Nature" = "#2fd64b", "Perception" = "#4b2fd6")) +
+  Ugly_theme()+xlab("      ")+
+  ylim(0, 100)+
+  geom_tile(data = nature_tile, aes(x = x, y = y, fill = Domain, height = height,width=0.67),color="black", alpha = 0.4,linewidth=1) +
+  geom_tile(data = self_tile, aes(x = x, y = y, fill = Domain, height = height,width=0.67),color="black", alpha = 0.4,linewidth=1) +
+  geom_tile(data = perception_tile, aes(x = x, y = y, fill = Domain, height = height,width=0.67),color="black", alpha = 0.4,linewidth=1)+
+  stat_pvalue_manual(tukey_pred,hide.ns = T,size = 8,x.position="identity",y.position = c(75,80,87),linewidth=1)+ylab("Sense of Reality")+guides(fill="none",color="none")+scale_x_discrete(expand = expansion(mult = c(0.5, 0.5)),labels = c(" ", " ", " ", " ", " ")) +
+  ggtitle("Mean predictions")+coord_cartesian(ylim = c(40, 90))+theme(aspect.ratio = 1.2,axis.text.x=element_text(size=18),axis.title.x=element_text(),axis.ticks.x = element_blank(),plot.title = element_text(vjust=1))
+
+```
+
+```{r Manusript Figure - overlay of model predictions on observed results (observed data are the lines, mean predictions are points)}
+ggplot(all_behave_mean, aes(x = Level, y = RealityRating, fill = Domain)) +
+ 
+  stat_summary(fun.data = "mean_cl_boot", geom = "ribbon", aes(fill = Domain),alpha=0.2) +
+  stat_summary(fun = mean, geom = "line", linewidth = 1.5, aes(color = Domain),position=position_dodge(width=0),alpha=0.5) +
+  stat_summary(aes(x=Level,y=pred,color = Domain, fill = Domain),fun.data="mean_cl_boot",position=position_dodge(width=0),geom="errorbar",width= 0.85,linewidth=1) +
+  stat_summary(aes(x=Level,y=pred, group = Domain),fun="mean",position=position_dodge(width=0),geom="point",color='black',shape=21,size = 3.5,alpha=0.9) +
+  
+  scale_fill_manual(values = c("Self" = "#d64b2f", "Nature" = "#2fd64b", "Perception" = "#4b2fd6")) +
+  scale_color_manual(values = c("Self" = "#d64b2f", "Nature" = "#2fd64b", "Perception" = "#4b2fd6")) +
+  
+  Ugly_theme()+
+  
+  xlab("Magnitude")+
+  ylab("Sense of Reality") +
+  ylim(0, 100)+
+  theme(legend.position = "none")+theme(aspect.ratio = 1.2,plot.title = element_text(vjust=2))+
+  coord_cartesian(ylim = c(40, 90))+ggtitle("Model predictions")+
+  annotate("text",x = 0.25,y=41,size=5,label="N=63")
+
+```
+
+```{r Manuscript Figure - of the simulation results overlaid on the observations (observed data are the lines, simulated means are points)}
+#Some editing is needed before plotting the simulation results
+results_simulations$Domain<-factor(results_simulations$Domain,levels = c("Nature","Self","Perception"))
+results_simulations$Pred<-as.numeric(results_simulations$Pred)
+colnames(results_simulations)[3]<-"Magnitude"
+results_simulations$Magnitude<-as.numeric(results_simulations$Magnitude)
+results_simulations$Magnitude<-results_simulations$Magnitude-1
+results_simulations<-results_simulations[,1:4]
+
+##Plot##
+ggplot(all_behave_mean, aes(x = Level, y = RealityRating, fill = Domain)) +
+stat_summary(fun.data = "mean_cl_boot", geom = "ribbon", aes(fill = Domain),alpha=0.2) +
+stat_summary(fun = mean, geom = "line", linewidth = 1.5, aes(color = Domain),position=position_dodge(width=0),alpha=0.5) +
+stat_summary(data = results_simulations, fun.data = "mean_cl_boot", geom = "errorbar", aes(x = Magnitude, y = Pred*100, group = Domain,color=Domain),position=position_dodge(width=0),width= 0.85,linewidth=1) +
+stat_summary(data = results_simulations, fun = mean, geom = "point",color="black",position=position_dodge(width=0),shape=21,size=3.5, aes(x = Magnitude, y = Pred*100, group = Domain), alpha = 0.9) +
+
+scale_fill_manual(values = c("Self" = "#d64b2f", "Nature" = "#2fd64b", "Perception" = "#4b2fd6")) +
+scale_color_manual(values = c("Self" = "#d64b2f", "Nature" = "#2fd64b", "Perception" = "#4b2fd6")) +
+  
+Ugly_theme() +xlab("Magnitude")+
+ylab("Sense of Reality") +
+ylim(0, 100)+theme(legend.position = "none",plot.title = element_text(vjust=2))+
+theme(aspect.ratio = 1.2)+ coord_cartesian(ylim = c(40, 90))+ggtitle("Bootstraped simulation")+
+annotate("text",x = 0.25,y=41,size=5,label="N=200")
+
+```
+
+```{r Statistical test  - comparing model parameter by domain}
+   
+#Normality cannot be assumed
+   split(CoefFit$p0, CoefFit$Domain) %>%
+  lapply(shapiro.test)
+
+# Show in New Window
+# $Nature
+# 
+# 	Shapiro-Wilk normality test
+# 
+# data:  X[[i]]
+# W = 0.92881, p-value = 0.001308
+# 
+# 
+# $Perception
+# 
+# 	Shapiro-Wilk normality test
+# 
+# data:  X[[i]]
+# W = 0.85679, p-value = 3.086e-06
+# 
+# 
+# $Self
+# 
+# 	Shapiro-Wilk normality test
+# 
+# data:  X[[i]]
+# W = 0.94103, p-value = 0.004625
+
+# Kruskal-Wallis test (non-parametric version of ANOVA)
+# First do Kruskal test
+kw_test_p <- kruskal.test(p0 ~ Domain, data = CoefFit)
+
+# Calculate eta-squared
+# H is chi-square value from test
+# n is total sample size
+eta_squared_p <- (kw_test_p$statistic - kw_test_p$parameter) / (nrow(CoefFit) - 1)
+#Result:p0 by Domain
+#Kruskal-Wallis chi-squared = 12.745, df = 2, p-value = 0.001708
+
+# If significant, follow up with pairwise Wilcoxon tests
+wlx_p<-pairwise.wilcox.test(CoefFit$p0, CoefFit$Domain, 
+                     p.adjust.method = "bonferroni")
+
+
+# 	Pairwise comparisons using Wilcoxon rank sum test with continuity correction 
+# 
+# data:  CoefFit$p0 and CoefFit$Domain 
+# 
+#            Nature Perception
+# Perception 0.0031 -         
+# Self       1.0000 0.0142    
+# 
+# P value adjustment method: bonferroni 
+###########################################################################################
+   split(CoefFit$sigma, CoefFit$Domain) %>%
+  lapply(shapiro.test)
+#non normal in two out of three, use kruskal wallis
+# W = 0.93155, p-value = 0.001724
+# 
+# W = 0.97487, p-value = 0.224
+# 
+# W = 0.97021, p-value = 0.13
+
+kw_test_s<-kruskal.test(sigma ~ Domain, data = CoefFit)
+
+# data:  sigma by Domain
+# Kruskal-Wallis chi-squared = 19.275, df = 2, p-value = 6.525e-05
+eta_squared_s <- (kw_test_s$statistic - kw_test_s$parameter) / (nrow(CoefFit) - 1)
+
+wlx_s<-pairwise.wilcox.test(CoefFit$sigma, CoefFit$Domain, 
+                     p.adjust.method = "bonferroni")
+# 
+# 	Pairwise comparisons using Wilcoxon rank sum test with continuity correction 
+# 
+# data:  CoefFit$sigma and CoefFit$Domain 
+# 
+#            Nature  Perception
+# Perception 0.00076 -         
+# Self       0.00029 1.00000   
+# 
+# P value adjustment method: bonferroni 
+#########################################################################################
+
+kw_test_k<-kruskal.test(K ~ Domain, data = CoefFit)
+# data:  K by Domain
+# Kruskal-Wallis chi-squared = 25.219, df = 2, p-value = 3.34e-06
+
+eta_squared_k <- (kw_test_k$statistic - kw_test_k$parameter) / (nrow(CoefFit) - 1)
+
+wlx_k<-pairwise.wilcox.test(CoefFit$K, CoefFit$Domain, 
+                     p.adjust.method = "bonferroni")
+
+# 	Pairwise comparisons using Wilcoxon rank sum test with continuity correction 
+# 
+# data:  CoefFit$K and CoefFit$Domain 
+# 
+#            Nature  Perception
+# Perception 1.3e-05 -         
+# Self       0.0011  0.1150    
+# 
+# P value adjustment method: bonferroni 
+#install.packages("rcompanion")
+
+
+```
+
+```{r the free parameters are not normally distributed so they must be described and analyzed non-parametrically using medians and CI}
+#Here's how to calculate CIs for medians using bootstrapping:
+# library(boot)
+# CoefFit$Subject<-as.factor(as.character(CoefFit$Subject))
+
+#not bootstrapped CI
+# sum_coef_p <- aggregate(p0 ~ Domain, data = CoefFit, 
+#                      FUN = function(x) c(median = median(x),
+#                                        ci_lower = quantile(x, 0.025),
+#                                        ci_upper = quantile(x, 0.975)))
+
+
+
+# Create bootstrap function for aggregation
+boot_ci <- function(x) {
+  # Function to calculate median in bootstrap
+  med_func <- function(data, indices) median(data[indices])
+  
+  # Do the bootstrap
+  boot_results <- boot(x, med_func, R=1000)
+  
+  # Get median and CI from bootstrap
+  c(median = median(x),
+    ci_lower = quantile(boot_results$t, 0.025),
+    ci_upper = quantile(boot_results$t, 0.975))
+}
+
+# Use it in aggregate
+sum_coef_p <- aggregate(p0 ~ Domain, data = CoefFit, FUN = boot_ci)
+
+sum_coef_s <- aggregate(sigma ~ Domain, data = CoefFit, FUN = boot_ci)
+
+sum_coef_k <- aggregate(K ~ Domain, data = CoefFit, FUN = boot_ci)
+```
+
+```{r}
+
+CoefFit$Domain<-factor(CoefFit$Domain,levels = c("Nature","Self","Perception"))
+
+# Convert wilcoxon test results to dataframe with stars
+wlx_k_df <- data.frame(
+  group1 = c("Nature", "Nature", "Perception"),
+  group2 = c("Perception", "Self", "Self"),
+  p.adj = c(1.3e-05, 0.0011, 0.1150),
+  # Convert directly to stars/ns
+  p.signif = c("****", "**", "ns")
+)
+
+# Use same plot but with wlx_k_df instead of tukey_preal
+ggboxplot(CoefFit, fill="Domain", x="Domain", y="p0", alpha=0.6, outlier.shape = NA) +
+  scale_fill_manual(values = c("Self" = "#d64b2f", "Nature" = "#2fd64b", "Perception" = "#4b2fd6")) +
+  scale_color_manual(values = c("Self" = "#d64b2f", "Nature" = "#2fd64b", "Perception" = "#4b2fd6")) +
+  geom_jitter(aes(x=Domain, y=p0, fill = Domain), position = position_jitter(width = 0.1), 
+              shape=21, size = 2, color="black", alpha=0.8, show.legend = FALSE) +
+  #stat_pvalue_manual(wlx_k_df, hide.ns = T, size = -1, x.position="identity", y.position=y.positions_p0) +
+  ylab("pReal") + Ugly_theme() +
+  guides(fill=FALSE, color=FALSE) +
+  theme(axis.title.y = element_text(face = "italic"),
+        axis.text.x = element_blank(),
+        axis.title.x = element_blank(),
+        axis.ticks.x=element_blank(),
+        plot.margin = unit(c(0.5,0,0,0),"pt")) +
+  coord_cartesian(ylim = c(0, 1.3))+geom_text(aes(group = Domain, label = "****", y = 1.5), position = position_dodge(width = 0.6), size = 8)
+```
+
+```{r Manuscript Figure - model parameters domain comparisons }
+
+
+#Adding coordinates for the statistical results to be displayed above the maximal data point
+y.positions_p0<-c(max(CoefFit$p0)+0.15,max(CoefFit$p0)+0.275)
+
+  ggboxplot(CoefFit ,fill="Domain",x="Domain",y="p0",alpha=0.6,outlier.shape = NA)+
+  scale_fill_manual(values = c("Self" = "#d64b2f", "Nature" = "#2fd64b", "Perception" = "#4b2fd6"))+
+  scale_color_manual(values = c("Self" = "#d64b2f", "Nature" = "#2fd64b", "Perception" = "#4b2fd6")) +
+  geom_jitter(aes(x=Domain,y=p0, fill = Domain),position = position_jitter(width = 0.1), shape=21,size = 2,color="black",alpha=0.8,show.legend = FALSE) +ylim(0,1.3)+
+  stat_pvalue_manual(tukey_preal,hide.ns = T,size = 8,x.position="identity",y.position=y.positions_p0)+
+  ylab("pReal")+Ugly_theme()+guides(fill=FALSE,color=FALSE)+theme(axis.title.y = element_text(face = "italic"),axis.text.x = element_blank(),axis.title.x = element_blank(),axis.ticks.x=element_blank(),,plot.margin = unit(c(0.5,0,0,0),"pt"))+ coord_cartesian(ylim = c(0, 1.3))
+
+
+  y.positions_sig<-c(2.55,2.75)  
+ggboxplot(CoefFit ,fill="Domain",x="Domain",y="sigma",alpha=0.6,outlier.shape = NA)+
+  scale_fill_manual(values = c("Self" = "#d64b2f", "Nature" = "#2fd64b", "Perception" = "#4b2fd6"))+
+  scale_color_manual(values = c("Self" = "#d64b2f", "Nature" = "#2fd64b", "Perception" = "#4b2fd6")) +
+  geom_jitter(aes(x=Domain,y=sigma, fill = Domain),position = position_jitter(width = 0.1), shape=21,size = 2,color="black",alpha=0.8,show.legend = FALSE)+
+  stat_pvalue_manual(tukey_sigma,hide.ns = T,size = 8,x.position="identity",y.position=y.positions_sig)+
+  ylab(expression(sigma))+Ugly_theme()+guides(fill=FALSE,color=FALSE)+theme(axis.title.y = element_text(face = "italic",size=25,angle = 90,vjust = 0.5),axis.text.x = element_blank(),axis.title.x = element_blank(),axis.ticks.x=element_blank())#+ coord_cartesian(ylim = c(0.15, 1.2))
+
+
+ y.positions_sig<-c(8.8,9.25)  
+  ggboxplot(CoefFit ,fill="Domain",x="Domain",y="k",alpha=0.6,outlier.shape = NA)+
+  scale_fill_manual(values = c("Self" = "#d64b2f", "Nature" = "#2fd64b", "Perception" = "#4b2fd6"))+
+  scale_color_manual(values = c("Self" = "#d64b2f", "Nature" = "#2fd64b", "Perception" = "#4b2fd6")) +
+  geom_jitter(aes(x=Domain,y=k, fill = Domain),position = position_jitter(width = 0.1), shape=21,size = 2,color="black",alpha=0.8,show.legend = FALSE)+
+  stat_pvalue_manual(tukey_k,hide.ns = T,size = 8,x.position="identity",y.position=y.positions_sig)+
+  ylab("k")+Ugly_theme()+guides(fill=FALSE,color=FALSE)+theme(axis.title.y = element_text(face = "italic",angle=90,vjust=0.5),axis.text.x = element_blank(),axis.title.x = element_blank(),axis.ticks.x=element_blank(),)
+
+  
+
+```
+
+```{r functions for making the hypothesis figures from panel C in figure 1}
+k_criterion <- function(p0_real, sigma) {
+  return((sigma^2*(sigma^2+DataSigma^2))/DataSigma^2*
+           (2*log(p0_real/(1-p0_real))+log((sigma^2+DataSigma^2)/sigma^2)))
+}
+
+hyp_dist<-function(mu, sigma,a,p0_real){
+ x <- seq(-4, 4, length.out = 10000)
+ y <- quadratic_normal(x, mu = mu, sigma = sigma, a = a)
+ df<-data.frame(x=x,y=y,k=k_criterion(p0_real=p0_real,sigma=sigma))
+ #plot(x, y, type = "l", col = "black", lwd = 2, xlab = "x", ylab = "f(x)", main = "Quadratic Normal Distribution")
+return(df)
+}
+
+quadratic_normal <- function(x, mu, sigma, a) {
+  exp(-(x - mu)^2 / (2 * sigma^2)) * a
+}
+```
+
+```{r Figure S.5 predicted vs observed overlayed facet by subs}
+
+ggplot(all_behave_mean,aes(x=Level ,y=RealityRating,color = Domain, fill = Domain))+
+  
+  stat_summary(fun="mean",geom="line",aes(color = Domain))+
+  stat_summary(fun.data="mean_cl_boot",width = 0.1,geom="errorbar",aes(color = Domain))+
+  
+  geom_point(aes(y=pred*100,x=Level,color = Domain, fill = Domain), shape=20,size=3)+
+  geom_line(aes(y=pred*100,x=Level,color = Domain, fill = Domain),linetype="dashed")+
+
+  scale_fill_manual(values = c("Self"="#d64b2f","Nature" = "#2fd64b","Perception"="#4b2fd6"))+
+  scale_color_manual(values = c("Self"="#d64b2f","Nature" = "#2fd64b","Perception"="#4b2fd6"))+
+  
+  xlab("Magnitude")+
+  ylab("Sense of Reality")+theme(strip.background = element_blank())+
+  guides(color=FALSE,fill=FALSE)+ylim(0,100)+Ugly_theme()+facet_wrap(vars(Subject),nrow=9)
+
+
+```
